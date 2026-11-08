@@ -96,6 +96,24 @@ class RestProtocolErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.code, 500)
         self.assertIn("Server closed connection", error.detail)
 
+    async def test_malformed_http11_status_line_keeps_400(self):
+        for answer in (b"HTTP/1.1 abc OK\r\n\r\n", b"HTTP/1.1 2000 OK\r\n\r\n", b"HTTP/1.0 20 OK\r\n\r\n"):
+            with self.subTest(answer=answer):
+                self.answer = answer
+                error = await self.request_error()
+                self.assertEqual(error.code, 400)
+                self.assertTrue(error.detail.startswith("HTTP error: "), error.detail)
+
+    @unittest.skipUnless(C_PARSER, "needs aiohttp's C HTTP parser")
+    async def test_frame_type_byte_alone_is_not_http2(self):
+        # type byte 0x04 (SETTINGS) at offset 3, but a non-zero stream id or a bad length: not an HTTP/2 frame
+        for answer in (bytes.fromhex("000006040000000001") + b"abcdef", bytes.fromhex("000005040000000000") + b"abcde"):
+            with self.subTest(answer=answer):
+                self.answer = answer
+                error = await self.request_error()
+                self.assertEqual(error.code, -2)
+                self.assertNotIn("(got HTTP/2)", error.detail)
+
     async def test_http_error_status_is_unchanged(self):
         self.answer = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 8\r\nconnection: close\r\n\r\nbad body"
         error = await self.request_error()

@@ -23,6 +23,17 @@ ProtoMessageT = TypeVar("ProtoMessageT", bound=Message)
 _QUOTED_BYTES = re.compile(r"b'(?:[^'\\\n]|\\.)*'|b\"(?:[^\"\\\n]|\\.)*\"")
 
 
+def _is_http2_control_frame(data: bytes) -> bool:
+    """True if data starts with a SETTINGS or GOAWAY frame header as a server sends first (RFC 9113, 4.1 / 6.5 / 6.8)."""
+    if len(data) < 9:
+        return False
+    length = int.from_bytes(data[:3], "big")
+    stream_id = int.from_bytes(data[5:9], "big") & 0x7FFFFFFF  # the top bit is reserved
+    if stream_id != 0 or length > 16384:  # both frames belong to stream 0; 16384 is the initial max frame size
+        return False
+    return (data[3] == 0x4 and length % 6 == 0) or (data[3] == 0x7 and length >= 8)
+
+
 def _describe_non_http11_answer(error: aiohttp.ClientResponseError) -> str | None:
     """Describe an answer without an HTTP/1.x status line, or return None for any other error."""
     parse_error = error.__cause__
@@ -37,7 +48,9 @@ def _describe_non_http11_answer(error: aiohttp.ClientResponseError) -> str | Non
         except (SyntaxError, ValueError):
             received = b""
 
-    if received.startswith((b"HTTP/2", b"HTTP/3", b"PRI * HTTP/2.0")) or (len(received) >= 9 and received[3] in (4, 7)):
+    if received.startswith(b"HTTP/1."):
+        return None  # a malformed HTTP/1.x status line keeps the usual 400 mapping
+    if received.startswith((b"HTTP/2", b"HTTP/3", b"PRI * HTTP/2.0")) or _is_http2_control_frame(received):
         got = "HTTP/2"  # a status line, the client preface, or a SETTINGS/GOAWAY frame
     elif received[:1] in (b"\x15", b"\x16") and received[1:2] == b"\x03":
         got = "TLS data"
