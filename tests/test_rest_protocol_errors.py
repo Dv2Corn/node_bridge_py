@@ -9,6 +9,7 @@ from aiohttp import http_parser
 
 from PasarGuardNodeBridge import NodeAPIError
 from PasarGuardNodeBridge.aiohttp_compat import LazyClientSession, make_timeout
+from PasarGuardNodeBridge.common import service_pb2 as service
 from PasarGuardNodeBridge.rest import Node as RestNode
 from PasarGuardNodeBridge.storage import InMemoryUserSyncStore
 
@@ -87,7 +88,20 @@ class RestProtocolErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_version_prefix_alone_is_not_http2(self):
         self.answer = b"HTTP/200 OK\r\ncontent-length: 0\r\n\r\n"
         error = await self.request_error()
-        self.assertNotIn("(got HTTP/2)", error.detail)
+        self.assertEqual(error.code, -2)
+        self.assertIn("did not answer with HTTP/1.1 (got b'HTTP/200 OK')", error.detail)
+
+    async def test_client_preface_line_with_junk_is_quoted(self):
+        self.answer = b"PRI * HTTP/2.0 junk\r\n\r\n"
+        error = await self.request_error()
+        self.assertEqual(error.code, -2)
+        self.assertIn("(got b'PRI * HTTP/2.0 junk')", error.detail)
+
+    async def test_client_preface_is_http2(self):
+        self.answer = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        error = await self.request_error()
+        self.assertEqual(error.code, -2)
+        self.assertIn("(got HTTP/2)", error.detail)
 
     @unittest.skipUnless(C_PARSER, "needs aiohttp's C HTTP parser")
     async def test_tls_answer_is_reported_as_protocol_error(self):
@@ -138,7 +152,9 @@ class RestProtocolErrorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_chunked_sync_reports_protocol_error(self):
         self.answer = b"HTTP/2 200\r\ncontent-length: 0\r\n\r\n"
-        failed = await self.node.sync_users_chunked([], timeout=5)
+        users = [service.User(email=f"user-{index}") for index in range(3)]
+        failed = await self.node.sync_users_chunked(users, chunk_size=2, timeout=5)
+        self.assertEqual(list(failed), users)
         self.assertFalse(failed.rejected)
         self.assertIn("Protocol error: Node did not answer with HTTP/1.1 (got HTTP/2)", failed.detail)
 

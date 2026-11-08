@@ -54,7 +54,8 @@ def _describe_non_http11_answer(error: aiohttp.ClientResponseError) -> str | Non
         return None  # a malformed HTTP/1.x status line keeps the usual 400 mapping
     if version := _HTTP2_OR_3_STATUS.match(received):
         got = f"HTTP/{version[1].decode()}"
-    elif received.startswith(b"PRI * HTTP/2.0") or _is_http2_control_frame(received):
+    elif received.rstrip(b"\r\n") == b"PRI * HTTP/2.0" or _is_http2_control_frame(received):
+        # both parsers keep only the first line of the client preface, so it must match exactly
         got = "HTTP/2"  # the client preface or a SETTINGS/GOAWAY frame
     elif received[:1] in (b"\x15", b"\x16") and received[1:2] == b"\x03":
         got = "TLS data"
