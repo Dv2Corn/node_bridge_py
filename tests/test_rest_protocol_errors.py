@@ -78,6 +78,17 @@ class RestProtocolErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.code, -2)
         self.assertIn("(got HTTP/2)", error.detail)
 
+    async def test_http3_status_line_is_labelled_http3(self):
+        self.answer = b"HTTP/3 200\r\ncontent-length: 0\r\n\r\n"
+        error = await self.request_error()
+        self.assertEqual(error.code, -2)
+        self.assertIn("(got HTTP/3)", error.detail)
+
+    async def test_version_prefix_alone_is_not_http2(self):
+        self.answer = b"HTTP/200 OK\r\ncontent-length: 0\r\n\r\n"
+        error = await self.request_error()
+        self.assertNotIn("(got HTTP/2)", error.detail)
+
     @unittest.skipUnless(C_PARSER, "needs aiohttp's C HTTP parser")
     async def test_tls_answer_is_reported_as_protocol_error(self):
         self.answer = TLS_RECORD
@@ -106,19 +117,30 @@ class RestProtocolErrorTests(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(C_PARSER, "needs aiohttp's C HTTP parser")
     async def test_frame_type_byte_alone_is_not_http2(self):
-        # type byte 0x04 (SETTINGS) at offset 3, but a non-zero stream id or a bad length: not an HTTP/2 frame
-        for answer in (bytes.fromhex("000006040000000001") + b"abcdef", bytes.fromhex("000005040000000000") + b"abcde"):
+        # a SETTINGS (0x04) or GOAWAY (0x07) type byte at offset 3, but a non-zero stream id or a bad length
+        for answer in (
+            bytes.fromhex("000006040000000001") + b"abcdef",
+            bytes.fromhex("000005040000000000") + b"abcde",
+            bytes.fromhex("000008070000000001") + b"abcdefgh",
+            bytes.fromhex("000004070000000000") + b"abcd",
+        ):
             with self.subTest(answer=answer):
                 self.answer = answer
                 error = await self.request_error()
                 self.assertEqual(error.code, -2)
-                self.assertNotIn("(got HTTP/2)", error.detail)
+                self.assertIn(f"(got {answer!r})", error.detail)
 
     async def test_http_error_status_is_unchanged(self):
         self.answer = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 8\r\nconnection: close\r\n\r\nbad body"
         error = await self.request_error()
         self.assertEqual(error.code, 400)
         self.assertEqual(error.detail, "HTTP error: bad body")
+
+    async def test_chunked_sync_reports_protocol_error(self):
+        self.answer = b"HTTP/2 200\r\ncontent-length: 0\r\n\r\n"
+        failed = await self.node.sync_users_chunked([], timeout=5)
+        self.assertFalse(failed.rejected)
+        self.assertIn("Protocol error: Node did not answer with HTTP/1.1 (got HTTP/2)", failed.detail)
 
     async def test_log_stream_open_reports_protocol_error(self):
         self.answer = b"HTTP/2 200\r\ncontent-type: text/plain\r\n\r\n"

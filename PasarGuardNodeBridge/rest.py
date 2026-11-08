@@ -21,6 +21,8 @@ ProtoMessageT = TypeVar("ProtoMessageT", bound=Message)
 
 # aiohttp's C parser quotes the bytes it could not parse as a Python bytes literal
 _QUOTED_BYTES = re.compile(r"b'(?:[^'\\\n]|\\.)*'|b\"(?:[^\"\\\n]|\\.)*\"")
+# An HTTP/2 or HTTP/3 status line: the whole version token, so HTTP/200 is not read as HTTP/2
+_HTTP2_OR_3_STATUS = re.compile(rb"HTTP/([23])(?:\.0)?(?:\s|$)")
 
 
 def _is_http2_control_frame(data: bytes) -> bool:
@@ -50,8 +52,10 @@ def _describe_non_http11_answer(error: aiohttp.ClientResponseError) -> str | Non
 
     if received.startswith(b"HTTP/1."):
         return None  # a malformed HTTP/1.x status line keeps the usual 400 mapping
-    if received.startswith((b"HTTP/2", b"HTTP/3", b"PRI * HTTP/2.0")) or _is_http2_control_frame(received):
-        got = "HTTP/2"  # a status line, the client preface, or a SETTINGS/GOAWAY frame
+    if version := _HTTP2_OR_3_STATUS.match(received):
+        got = f"HTTP/{version[1].decode()}"
+    elif received.startswith(b"PRI * HTTP/2.0") or _is_http2_control_frame(received):
+        got = "HTTP/2"  # the client preface or a SETTINGS/GOAWAY frame
     elif received[:1] in (b"\x15", b"\x16") and received[1:2] == b"\x03":
         got = "TLS data"
     elif received:
@@ -431,8 +435,11 @@ class Node(PasarGuardNode):
                     return []
             except Exception as e:
                 error_type = type(e).__name__
+                error_text = str(e)
+                if isinstance(e, aiohttp.ClientResponseError) and (protocol := _describe_non_http11_answer(e)):
+                    error_text = f"Protocol error: {protocol}"
                 self.logger.warning(
-                    f"[{self.name}] Chunked REST sync failed for {len(users)} user(s) | Error: {error_type} - {e!s}"
+                    f"[{self.name}] Chunked REST sync failed for {len(users)} user(s) | Error: {error_type} - {error_text}"
                 )
                 # The node answers 500 with its backend's error when it refused the batch. It answers
                 # "backend not initialized" or "backend is not started" (also 500) or 503 when no core
@@ -443,7 +450,7 @@ class Node(PasarGuardNode):
                     and e.response.status_code == 500
                     and detail not in ("backend not initialized", "backend is not started")
                 )
-                return FailedUsers(users, rejected=rejected, detail=detail if rejected else str(e))
+                return FailedUsers(users, rejected=rejected, detail=detail if rejected else error_text)
 
     async def list_routing_rules(self, timeout: int | None = None) -> service.RoutingRulesResponse | None:
         timeout = timeout or self._default_timeout
